@@ -1,0 +1,748 @@
+---
+title: Debian在线部署
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## 安装准备
+
+### 更新操作系统
+
+```sh frame="none"
+apt update && apt install vim -y && apt install zip -y && apt install unzip -y
+```
+
+### 创建目录
+
+```sh frame="none"
+mkdir -p /data
+```
+
+### 上传文件
+
+> 上传文件至`/data`目录下
+
+### 解压文件
+
+```sh frame="none"
+# 解压JDK并重命名
+cd /data/ && mkdir -p /data/jdk && tar -xzvf OpenJDK*.tar.gz -C /data/jdk --strip-components 1 && rm -rf OpenJDK*.tar.gz
+# 解压云枢平台和报表
+cd /data/ && unzip cloudpivot_*.zip && rm -rf cloudpivot_*.zip;unzip reporter-deploy-*.zip && rm -rf reporter-deploy-*.zip 
+```
+
+## 安装JDK
+
+### 配置JDK环境
+
+```sh frame="none"
+echo "export JAVA_HOME=/data/jdk
+export CLASSPATH=.:\$JAVA_HOME/jre/lib/rt.jar:\$JAVA_HOME/lib/dt.jar:\$JAVA_HOME/lib/tools.jar
+export PATH=\$PATH:\$JAVA_HOME/bin" >> /etc/profile
+```
+
+### 验证版本
+
+```sh frame="none"
+source /etc/profile && java -version
+```
+
+## 安装MySQL
+
+### 设置MySQL软件源
+
+```sh frame="none"
+echo "deb http://repo.mysql.com/apt/debian/ buster mysql-5.7" | tee /etc/apt/sources.list.d/mysql.list 
+```
+
+### 导入密钥
+
+```sh frame="none"
+gpg --keyserver keyserver.ubuntu.com --recv-keys B7B3B788A8D3785C && gpg --export --armor B7B3B788A8D3785C > /etc/apt/trusted.gpg.d/debian-archive-buster-mysql.asc
+```
+
+### 创建数据库存储目录
+
+```sh frame="none"
+mkdir -p /data/mysql/prod
+```
+
+### 安装MySQL数据库
+
+:::caution
+安装前请使用命令`dpkg -l | grep mariadb`检查操作系统是否安装了`mariadb`数据库，如果安装了请使用命令`apt remove mariadb* -y`进行卸载之后再执行下面命令
+:::
+
+```shell frame="none"
+apt update && apt-get install mysql-server -y 
+```
+
+### 修改配置文件
+
+> 修改`/etc/my.cnf`配置文件，可根据实际情况修改对应的配置，例如存储位置`datadir`之类的参数，如下快捷命令可直接执行
+
+<details>
+<summary>点我查看配置</summary>
+
+```sh
+<!-- /etc/my.cnf -->
+echo '!includedir /etc/mysql/conf.d/
+
+[mysqld]
+# 基础信息配置
+port=3306
+character_set_server=utf8mb4
+datadir=/data/mysql/prod
+socket=/var/run/mysqld/mysqld.sock
+symbolic-links=0
+log-error=/var/log/mysql/error.log
+pid-file=/var/run/mysqld/mysqld.pid
+sql_mode=STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION
+# 大小写是否敏感设置
+# 0：表名存储在磁盘是区分大小写的，比较也是区分大小写的
+# 1：表名存储在磁盘是小写的，比较也是小写的
+# 2：表名存储在磁盘是区分大小写的，比较是小写的
+lower_case_table_names=1
+
+# 连接配置
+max_connections=3000
+max_user_connections=3000
+max_connect_errors=100000
+max_allowed_packet=1G
+collation_server=utf8mb4_general_ci
+table_open_cache=8000
+
+# 日志配置
+expire_logs_days=30
+binlog_format=mixed
+slow_query_log=ON
+slow_query_log_file=/data/mysql/prod/slow.log
+long_query_time=3
+log_queries_not_using_indexes=on
+
+# innodb配置
+innodb_file_per_table=1
+# 根据服务器上的可用RAM，你可能考虑增加这个值
+innodb_buffer_pool_size=8G
+innodb_log_file_size=1024M
+innodb_log_buffer_size=64M
+
+# 集群配置
+# 唯一标识符，用于标识MySQL集群中的每个服务器 每个服务器应依次递增
+server-id=1
+# 用于设定每个节点之间的自增主键的起始值 每个服务器应依次递增
+auto-increment-offset=1 
+# 用于设定每个节点之间的自增主键的增量 一般和服务器节点数量一致
+auto-increment-increment=2
+log-bin=mysql-bin
+relay-log=localhost-relay-bin
+relay-log-index=slave-relay-bin.index
+
+# 需要同步的库 网上教程多是逗号隔开这是错误的配置方式
+binlog-do-db=cloudpivot
+binlog-do-db=h3yun_report
+
+[mysql]
+default_character_set=utf8mb4
+[client]
+default_character_set=utf8mb4' > /etc/mysql/my.cnf && chown -R mysql:mysql /data/mysql/prod/
+```
+
+</details>
+
+
+### 启动MySQL并设置开机自启动
+
+```sh frame="none"
+systemctl restart mysql && systemctl enable mysql
+```
+
+### 登录MySQL
+
+```sh frame="none"
+mysql -u root -p
+```
+
+### 创建数据库和用户
+
+> 此操作是在登录MySQL后执行，并非是Shell命令
+
+```sql frame="none"
+-- 创建云枢平台数据库
+CREATE DATABASE IF NOT EXISTS cloudpivot DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_general_ci;
+-- 创建云枢报表数据库
+CREATE DATABASE IF NOT EXISTS h3yun_report DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_general_ci;
+-- 授权平台库并创建用户 用户名authine 密码请自行定义
+GRANT ALL PRIVILEGES ON cloudpivot.* TO 'authine'@'%' identified by '你的密码';
+-- 授权报表库
+GRANT ALL PRIVILEGES ON h3yun_report.* TO 'authine'@'%';
+-- 刷新权限
+FLUSH PRIVILEGES;
+-- 取消授权可以使用以下语句
+-- REVOKE ALL PRIVILEGES ON cloudpivot.* FROM authine;
+-- REVOKE ALL PRIVILEGES ON h3yun_report.* FROM authine;
+```
+
+### 初始化数据库
+
+> 此操作是在登录MySQL后执行，并非是Shell命令
+
+<span style="color:red;font-weight:600">注意：第三步很多客户都未配置或配置错误导致登录出现OAuth Error。请大家仔细看说明，要修改此配置信息请先修改数据->停止后端服务->清空Redis缓存->重启云枢</span>
+
+```sql frame="none"
+-- 第一步切换数据库
+use cloudpivot;
+-- 第二步执行初始SQL
+source /data/cloudpivot/db/migration/mysql/deploy/install/all_init.sql
+-- 第三步修改权限表 此配置是配置云枢合法的登录地址，未配置的地址将无法登录。支持多套地址，每组都为四个以逗号隔开，请将{host}替换为你自己服务的地址 http(s)://IP:PORT
+UPDATE base_security_client SET registeredRedirectUris='{host}/admin,{host}/admin#/oauth,{host}/oauth,{host}/mobile/oauth' WHERE id = '8a5da52ed126447d359e70c05721a8aa';
+-- 第三步切换数据库
+use h3yun_report;
+-- 第四步执行初始SQL
+source /data/reporter-deploy/sql/report_mysql.sql
+```
+
+## 安装Redis
+
+### 在线安装 
+
+如遇安装失败请参考[官网安装教程](https://redis.io/docs/getting-started/installation/)
+
+```sh frame="none"
+curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
+apt update && apt install -y redis
+```
+
+### 修改配置文件
+
+```sh frame="none"
+vim /etc/redis.conf
+```
+
+主要修改`bind`、`requirepass`两个配置
+
+```sh
+<!-- /etc/redis.conf -->
+#允许所有地址连接
+bind 0.0.0.0
+#配置密码
+requirepass Authine!2024
+```
+
+### 重启服务
+
+配置开机自启动重启服务
+
+```sh frame="none"
+systemctl restart redis-server.service && systemctl enable redis-server.service
+```
+
+## 安装Nginx
+
+### 配置NGINX软件源
+
+> 可参考[NGINX官网安装教程](http://nginx.org/en/linux_packages.html#RHEL-CentOS)
+
+```sh frame="none"
+apt install curl gnupg2 ca-certificates lsb-release debian-archive-keyring -y
+curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
+gpg --dry-run --quiet --import --import-options import-show /usr/share/keyrings/nginx-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/debian $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list
+apt update && apt install nginx -y
+```
+
+### 修改NGINX配置
+
+> 使用命令`vim /etc/nginx/nginx.conf`或可视化编辑工具将该配置文件修改成如下内容
+
+<Tabs>
+  <TabItem label="6.12.X及以上">
+
+<details>
+<summary>点我查看配置</summary>
+
+  ```shell
+<!-- /etc/nginx/nginx.conf -->
+# For more information on configuration, see:
+#   * Official English Documentation: http://nginx.org/en/docs/
+#   * Official Russian Documentation: http://nginx.org/ru/docs/
+
+user nginx;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log;
+
+# Load dynamic modules. See /usr/share/nginx/README.dynamic.
+include /usr/share/nginx/modules/*.conf;
+
+events {
+    use                epoll;
+    multi_accept       on;
+    worker_connections 65535;
+}
+
+http {
+    upstream cloudpivot {
+        least_conn;
+        server 127.0.0.1:8080;
+    }
+    upstream report {
+        least_conn;
+        server 127.0.0.1:6061;
+    }
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for" "$upstream_addr" "$upstream_status"';
+    #设定mime类型,类型由mime.type文件定义
+    include                /etc/nginx/mime.types;
+    default_type           application/octet-stream;		
+    charset                utf-8;
+    sendfile               on;
+    keepalive_timeout      65;
+    tcp_nopush             on;
+    tcp_nodelay            on;
+    types_hash_max_size    2048;
+    gzip                   on;
+    gzip_vary              off;
+    gzip_disable           "MSIE [1-6]\."; 
+    gzip_min_length        1k;
+    gzip_buffers           4 16k;
+    gzip_comp_level        6;
+    gzip_types             text/plain application/javascript application/x-javascript text/css application/xml text/javascript image/jpeg image/gif image/png;
+    proxy_hide_header      X-Powered-By;
+    proxy_hide_header      Server;
+    #absolute_redirect off; 
+    
+    #这里可以配置限流操作
+    #定义一个名为allips的limit_req_zone用来存储session，大小是10M内存，
+    #以$binary_remote_addr 为key,限制平均每秒的请求为20个，
+    #1M能存储16000个状态，rete的值必须为整数，
+    #如果限制两秒钟一个请求，可以设置成30r/m
+    #limit_req_zone		$binary_remote_addr zone=allips:10m rate=50r/s;
+	
+    #关闭访问日志
+    #access_log             off; 
+    access_log             /var/log/nginx/access.log  main;
+        
+    server {
+        listen       80 default_server;
+        listen       [::]:80 default_server;
+        server_name  _;
+
+        root         /data/cloudpivot/program/frontEnd/portal/;
+        server_tokens off;
+        #Load configuration files for the default server block.
+        include /etc/nginx/default.d/*.conf;
+
+        location / {
+            try_files $uri $uri/index.html $uri/ /index.html;
+            #absolute_redirect off;
+            #入口页面不缓存
+            add_header Last-Modified $date_gmt;
+            add_header Cache-Control 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0';
+            if_modified_since off;
+            expires off;
+            etag off;
+        }
+
+        location ~* ^.+\.(css|js|ico|gif|jpg|jpeg|png)$ {
+            log_not_found off;
+            #关闭日志
+            access_log off;
+            #缓存时间30天
+            expires 30d;
+        }
+
+        location ^~ /api/ {
+            proxy_pass http://cloudpivot;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header X-Real-IP           $remote_addr;
+            proxy_set_header X-Forwarded-For     $proxy_add_x_forwarded_for;
+
+            #可将下面两个配置为固定值: 对应入口层协议和端口 (适用于: nginx外层还有proxy并与当前scheme, server_port不一致的情况)
+            proxy_set_header X-Forwarded-Proto   $scheme;
+            #proxy_set_header X-Forwarded-Proto   https;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #proxy_set_header X-Forwarded-Port    443;
+            
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+        
+        location /dashboard/ {
+            proxy_pass http://report/dashboard/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+        
+        # 云枢8.0配套报表需要 不配置表单的统计分析功能无法使用 8.0以下可以取消此配置
+        location /statistic/ {
+            proxy_pass http://report/statistic/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }          
+        
+        location /common/ {
+            proxy_pass http://report/common/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }        
+
+        location /data-source/ {
+            proxy_pass http://report/data-source/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+
+        location /v1/ {
+            proxy_pass http://cloudpivot/api/v1/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+     }
+}
+  ```
+</details>
+
+  </TabItem>
+  <TabItem label="6.12.X以下">
+
+  <details>
+<summary>点我查看配置</summary>
+
+  ```shell
+<!-- /etc/nginx/nginx.conf -->
+# For more information on configuration, see:
+#   * Official English Documentation: http://nginx.org/en/docs/
+#   * Official Russian Documentation: http://nginx.org/ru/docs/
+
+user nginx;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log;
+
+# Load dynamic modules. See /usr/share/nginx/README.dynamic.
+include /usr/share/nginx/modules/*.conf;
+
+events {
+    use                epoll;
+    multi_accept       on;
+    worker_connections 65535;
+}
+
+http {
+    upstream cloudpivot {
+        least_conn;
+        server 127.0.0.1:8080;
+    }
+    upstream report_dashboard {
+        least_conn;
+        server 127.0.0.1:6061;
+    }
+    upstream report_datasource {
+        least_conn;
+        server 127.0.0.1:6063;
+    }
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for" "$upstream_addr" "$upstream_status"';
+    #设定mime类型,类型由mime.type文件定义
+    include                /etc/nginx/mime.types;
+    default_type           application/octet-stream;		
+    charset                utf-8;
+    sendfile               on;
+    keepalive_timeout      65;
+    tcp_nopush             on;
+    tcp_nodelay            on;
+    types_hash_max_size    2048;
+    gzip                   on;
+    gzip_vary              off;
+    gzip_disable           "MSIE [1-6]\."; 
+    gzip_min_length        1k;
+    gzip_buffers           4 16k;
+    gzip_comp_level        6;
+    gzip_types             text/plain application/javascript application/x-javascript text/css application/xml text/javascript image/jpeg image/gif image/png;
+    proxy_hide_header      X-Powered-By;
+    proxy_hide_header      Server;
+    
+    #这里可以配置限流操作
+    #定义一个名为allips的limit_req_zone用来存储session，大小是10M内存，
+    #以$binary_remote_addr 为key,限制平均每秒的请求为20个，
+    #1M能存储16000个状态，rete的值必须为整数，
+    #如果限制两秒钟一个请求，可以设置成30r/m
+    #limit_req_zone		$binary_remote_addr zone=allips:10m rate=50r/s;
+	
+    #关闭访问日志
+    #access_log             off; 
+    access_log             /var/log/nginx/access.log  main;
+        
+    server {
+        listen       80 default_server;
+        listen       [::]:80 default_server;
+        server_name  _;
+
+        root         /data/cloudpivot/program/frontEnd/portal/;
+        server_tokens off;
+        #Load configuration files for the default server block.
+        include /etc/nginx/default.d/*.conf;
+
+        location / {
+            try_files $uri $uri/index.html $uri/ /index.html;
+            #absolute_redirect off;
+            #入口页面不缓存
+            add_header Last-Modified $date_gmt;
+            add_header Cache-Control 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0';
+            if_modified_since off;
+            expires off;
+            etag off;
+        }
+
+        location ~* ^.+\.(css|js|ico|gif|jpg|jpeg|png)$ {
+            log_not_found off;
+            #关闭日志
+            access_log off;
+            #缓存时间30天
+            expires 30d;
+        }
+
+        location ^~ /api/ {
+            proxy_pass http://cloudpivot;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header X-Real-IP           $remote_addr;
+            proxy_set_header X-Forwarded-For     $proxy_add_x_forwarded_for;
+
+            #可将下面两个配置为固定值: 对应入口层协议和端口 (适用于: nginx外层还有proxy并与当前scheme, server_port不一致的情况)
+            proxy_set_header X-Forwarded-Proto   $scheme;
+            #proxy_set_header X-Forwarded-Proto   https;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #proxy_set_header X-Forwarded-Port    443;
+            
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+        
+        location /dashboard/ {
+            proxy_pass http://report_dashboard/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+
+        location /data-source/ {
+            proxy_pass http://report_datasource/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+
+        location /v1/ {
+            proxy_pass http://cloudpivot/api/v1/;
+            #proxy_set_header   Host              $host:$server_port;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Port    $server_port;
+            #absolute_redirect off;
+            client_max_body_size 200m;
+            proxy_read_timeout  300;
+        }
+     }
+}
+  ```
+
+</details>
+
+  </TabItem>
+</Tabs>
+
+
+
+### 配置开机自启动
+
+```sh frame="none"
+systemctl restart nginx && systemctl enable nginx.service
+```
+
+## 安装云枢平台
+
+### 修改云枢平台配置文件
+
+使用命令`vim /data/cloudpivot/program/backEnd/webapi/application-prod.yml`修改配置文件 主要修改内容如下,其他配置请参考[云枢开发者手册](https://www.yuque.com/skwme4)
+
+数据库配置：主要是`url`、`username`、`password`三个属性
+
+``` yaml
+<!-- application-prod.yml -->
+spring:
+datasource:
+#数据库驱动:
+#driver-class-name: oracle.jdbc.OracleDriver # Oracle
+#driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver # SQL Server
+driver-class-name: com.mysql.cj.jdbc.Driver  # MySQL
+#数据库连接：
+#url: jdbc:oracle:thin:@127.0.0.1:1521:orcl                                                                                     #ORACLE
+#url: jdbc:sqlserver://127.0.0.1:3433;database=cloudpivot                                                                       #SQL Server
+url: jdbc:mysql://127.0.0.1:3306/cloudpivot?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&useSSL=false   #MySQL
+username: authine
+password: Authine!2024
+```
+
+Redis配置：主要是`host`、`database`、`password`三个属性
+
+```yaml frame="none"
+spring:  
+redis:
+host: 127.0.0.1     #地址
+database: 0         #集群模式下不指定数据库，注释此选项
+password: Authine!2024  #密码
+```
+
+报表配置：主要是`thirdDatasourceUrl`属性
+<Tabs>
+  <TabItem label="5.X及以上版本">
+
+  ```yaml frame="none"
+cloudpivot:
+report:
+ #datasourceurl: http://127.0.0.1:6060  #报表integrate-webapi项目的访问地址，如果是同服务器部署并且报表使用默认的6060端口  可直接使用http://127.0.0.1:6060
+ supportoralce: true       #是否支持oracle    报表后台版本20200318-2.3.0.4 以后默认打开
+ # 注意：5.X及以上版本配置报表地址即可
+ thirdDatasourceUrl: http://127.0.0.1:6061 #报表自定义sql服务器接口地址
+  ```
+  </TabItem>
+  <TabItem label="5.X以下版本">
+
+  ```yaml frame="none"
+cloudpivot:
+report:
+ #datasourceurl: http://127.0.0.1:6060  #报表integrate-webapi项目的访问地址，如果是同服务器部署并且报表使用默认的6060端口  可直接使用http://127.0.0.1:6060
+ supportoralce: true       #是否支持oracle    报表后台版本20200318-2.3.0.4 以后默认打开
+ # 注意：5.X以下版本配置NGINX代理后的报表地址
+ thirdDatasourceUrl: http://127.0.0.1:80 #报表自定义sql服务器接口地址
+  ```
+  </TabItem>
+</Tabs>
+
+### 修改报表配置文件
+
+先执行以下命令再做编辑
+
+```sh frame="none"
+cd /data/reporter-deploy/bin/ && chmod 755 *
+```
+
+使用命令`vim /data/reporter-deploy/bin/report.config`修改配置文件 主要修改内容如下,其他配置请参考[云枢开发者手册](https://www.yuque.com/skwme4)
+<Tabs>
+  <TabItem label="5.X及以上版本">
+  ```properties frame="none"
+  # 注意：5.X及以上版本配置云枢地址即可
+  REPORTER_ADAPTOR_HOST="http://127.0.0.1:8080/api/"
+  # 日志目录
+  REPORTER_LOG_DIR=/data/reporter-deploy/applog
+  ```
+  </TabItem>
+  <TabItem label="5.X以下版本">
+  ```properties frame="none"
+# 注意：5.X以下版本配置NGINX代理后的云枢地址
+REPORTER_ADAPTOR_PORT=80
+REPORTER_ADAPTOR_HOST="127.0.0.1"
+# 日志目录
+REPORTER_LOG_DIR=/data/reporter-deploy/applog
+  ```
+  </TabItem>
+</Tabs>
+
+数据库配置:
+
+`REPORTER_DATASTORE_DB_URL`、`REPORTER_DATASTORE_DB_USER`、`REPORTER_DATASTORE_DB_PASSWORD`三个属性
+
+```properties frame="none"
+# mysql
+REPORTER_DATASTORE_DB_DRIVER="com.mysql.cj.jdbc.Driver"
+REPORTER_DATASTORE_DB_URL="jdbc:mysql://host:3306/h3yun_report?serverTimezone=UTC&useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useSSL=false&zeroDateTimeBehavior=convertToNull&allowMultiQueries=true"
+
+# oracle
+# REPORTER_DATASTORE_DB_DRIVER="oracle.jdbc.driver.OracleDriver"
+# REPORTER_DATASTORE_DB_URL="jdbc:oracle:thin:@//host:41521/db_name"
+REPORTER_DATASTORE_DB_USER="db_user"
+REPORTER_DATASTORE_DB_PASSWORD="db_password"
+```
+
+安装配置文件：此操作主要是为了执行脚本生成配置文件
+
+```sh frame="none"
+/data/reporter-deploy/bin/setup.sh
+```
+
+## 启动云枢服务
+
+### 启动云枢平台
+
+> 如果有升级或者是覆盖安装的请先执行 `/data/cloudpivot/program/backEnd/deploy.sh clean` 命令清除一下老版本安装信息
+
+```sh frame="none"
+/data/cloudpivot/program/backEnd/deploy.sh webapi
+```
+
+### 启动报表服务
+
+```sh frame="none"
+/data/reporter-deploy/bin/startup.sh
+```
+
+### 验证登录
+
+浏览器输入地址`http://IP:PORT/admin`输入账号:`admin`密码:`123456`登录后即可进入后台管理，`http://IP:PORT`为普通用户登录地址需初始化组织架构后才可使用。
+
+<span style="color:red;font-weight:600">注意：默认安装完成后云枢平台需要进行组织架构配置(系统管理>组织配置)和文件存储配置(系统管理>统一配置>文件存储)</span>
+
+
+
+<span style="color:green;font-weight:600">说明：不初始化组织架构普通用户登录地址会出现空白页，未配置文件存储会导致导入导出及文件相关控件无法使用，application.yml还有更多配置请自行查看都有详细注解</span>
+
